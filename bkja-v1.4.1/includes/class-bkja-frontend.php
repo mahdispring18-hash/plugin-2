@@ -104,6 +104,7 @@ class BKJA_Frontend {
                 'model'              => isset($ai_response['model']) ? $ai_response['model'] : $resolved_model,
                 'category'           => $category,
                 'normalized_message' => $normalized_message,
+                'job_title'          => !empty($ai_response['job_title']) ? $ai_response['job_title'] : '',
             );
             $reply_meta = wp_json_encode($meta_payload);
         }
