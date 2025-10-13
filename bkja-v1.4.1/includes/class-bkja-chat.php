@@ -1,0 +1,660 @@
+<?php 
+if ( ! defined( 'ABSPATH' ) ) exit;
+
+class BKJA_Chat {
+
+    protected static $allowed_models = array( 'gpt-4o-mini', 'gpt-4o', 'gpt-4', 'gpt-3.5-turbo', 'gpt-5' );
+
+    // گرفتن API Key
+    public static function get_api_key(){
+        return trim(get_option('bkja_openai_api_key',''));
+    }
+
+    public static function normalize_message( $message ) {
+        if ( ! is_string( $message ) ) {
+            $message = (string) $message;
+        }
+
+        $message = preg_replace( '/\s+/u', ' ', $message );
+        return trim( (string) $message );
+    }
+
+    public static function resolve_model( $maybe = '' ) {
+        $maybe = is_string( $maybe ) ? trim( $maybe ) : '';
+        if ( $maybe && in_array( $maybe, self::$allowed_models, true ) ) {
+            return $maybe;
+        }
+
+        $stored = trim( (string) get_option( 'bkja_model', '' ) );
+        if ( $stored && in_array( $stored, self::$allowed_models, true ) ) {
+            return $stored;
+        }
+
+        return 'gpt-4o-mini';
+    }
+
+    public static function build_cache_key( $message, $category = '', $model = '' ) {
+        $normalized = self::normalize_message( $message );
+        $category   = is_string( $category ) ? trim( $category ) : '';
+        $model      = self::resolve_model( $model );
+
+        $parts = array(
+            'msg:' . $normalized,
+            'cat:' . $category,
+            'm:' . $model,
+        );
+
+        return 'bkja_cache_' . md5( implode( '|', $parts ) );
+    }
+
+    protected static function is_cache_enabled() {
+        return '1' === (string) get_option( 'bkja_enable_cache', '1' );
+    }
+
+    protected static function get_cache_ttl( $model ) {
+        $model = self::resolve_model( $model );
+
+        $custom_mini   = absint( get_option( 'bkja_cache_ttl_mini' ) );
+        $custom_others = absint( get_option( 'bkja_cache_ttl_others' ) );
+
+        if ( 'gpt-4o-mini' === $model ) {
+            return $custom_mini > 0 ? $custom_mini : HOUR_IN_SECONDS;
+        }
+
+        if ( in_array( $model, array( 'gpt-4o', 'gpt-4', 'gpt-5' ), true ) ) {
+            $ttl = 2 * HOUR_IN_SECONDS;
+            return $custom_others > 0 ? $custom_others : $ttl;
+        }
+
+        return $custom_others > 0 ? $custom_others : HOUR_IN_SECONDS;
+    }
+
+    protected static function should_accept_cached_payload( $normalized_message, $payload ) {
+        if ( empty( $normalized_message ) || empty( $payload ) ) {
+            return false;
+        }
+
+        if ( is_array( $payload ) ) {
+            $text = isset( $payload['text'] ) ? $payload['text'] : '';
+        } else {
+            $text = (string) $payload;
+        }
+
+        $text = (string) $text;
+
+        $keywords = array( 'درآمد', 'حقوق', 'سرمایه' );
+        $haystack = function_exists( 'mb_strtolower' ) ? mb_strtolower( $normalized_message, 'UTF-8' ) : strtolower( $normalized_message );
+
+        foreach ( $keywords as $keyword ) {
+            $keyword_check = function_exists( 'mb_strpos' ) ? mb_strpos( $haystack, $keyword ) : strpos( $haystack, $keyword );
+            if ( false !== $keyword_check ) {
+                if ( ! preg_match( '/[0-9۰-۹]+/u', $text ) ) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    protected static function clamp_history( $history, $limit = 4 ) {
+        if ( ! is_array( $history ) || $limit <= 0 ) {
+            return array();
+        }
+
+        if ( count( $history ) <= $limit ) {
+            return $history;
+        }
+
+        return array_slice( $history, -1 * $limit );
+    }
+
+    protected static function get_feedback_hint( $normalized_message, $session_id, $user_id ) {
+        if ( empty( $normalized_message ) || ! class_exists( 'BKJA_Database' ) ) {
+            return '';
+        }
+
+        $row = BKJA_Database::get_latest_feedback( $normalized_message, $session_id, (int) $user_id );
+        if ( empty( $row ) || (int) $row['vote'] !== -1 ) {
+            return '';
+        }
+
+        $message = 'پاسخ قبلی برای این کاربر رضایت‌بخش نبود؛ لطفاً کوتاه‌تر، دقیق‌تر و عدد-محورتر پاسخ بده و در صورت وجود داده‌های داخلی، منبع را اعلام کن.';
+
+        $tags = array();
+        if ( ! empty( $row['tags'] ) ) {
+            $parts = explode( ',', $row['tags'] );
+            foreach ( $parts as $part ) {
+                $part = trim( $part );
+                if ( $part ) {
+                    $tags[] = $part;
+                }
+            }
+        }
+
+        if ( $tags ) {
+            $message .= ' نکات اعلام‌شده کاربر: ' . implode( ', ', $tags ) . '.';
+        }
+
+        if ( ! empty( $row['comment'] ) ) {
+            $message .= ' توضیح کاربر: ' . trim( $row['comment'] ) . '.';
+        }
+
+        return $message;
+    }
+
+    // دریافت خلاصه و رکوردهای شغل مرتبط با پیام
+    public static function get_job_context($message) {
+        global $wpdb;
+
+        $normalized = self::normalize_message( $message );
+        if ( '' === $normalized ) {
+            return array();
+        }
+
+        $table = $wpdb->prefix . 'bkja_jobs';
+
+        static $title_column = null;
+        if ( null === $title_column ) {
+            $columns = $wpdb->get_col( "DESC {$table}", 0 );
+            if ( is_array( $columns ) && in_array( 'job_title', $columns, true ) ) {
+                $title_column = 'job_title';
+            } else {
+                $title_column = 'title';
+            }
+        }
+
+        $like = '%' . $wpdb->esc_like( $normalized ) . '%';
+        $row  = $wpdb->get_row( $wpdb->prepare( "SELECT {$title_column} AS job_title FROM {$table} WHERE {$title_column} LIKE %s LIMIT 1", $like ) );
+        if ( ! $row || empty( $row->job_title ) ) {
+            return array();
+        }
+
+        $job_title = $row->job_title;
+
+        $summary = class_exists('BKJA_Database') ? BKJA_Database::get_job_summary($job_title) : null;
+        $records = class_exists('BKJA_Database') ? BKJA_Database::get_job_records($job_title, 5, 0) : [];
+        return [
+            'job_title' => $job_title,
+            'summary'   => $summary,
+            'records'   => $records
+        ];
+    }
+
+    protected static function build_context_prompt( $context ) {
+        if ( empty( $context['job_title'] ) ) {
+            return '';
+        }
+
+        $title = $context['job_title'];
+        $lines = array();
+        $lines[] = "داده‌های داخلی ساخت‌یافته درباره شغل «{$title}»:";
+
+        if ( ! empty( $context['summary'] ) && is_array( $context['summary'] ) ) {
+            $summary = $context['summary'];
+            $lines[] = 'میانگین درآمد اعلام‌شده: ' . ( ! empty( $summary['income'] ) ? $summary['income'] : 'نامشخص/تقریبی' );
+            $lines[] = 'میانگین سرمایه لازم: ' . ( ! empty( $summary['investment'] ) ? $summary['investment'] : 'نامشخص/تقریبی' );
+            if ( ! empty( $summary['cities'] ) ) {
+                $lines[] = 'شهرهای پرتکرار تجربه‌شده: ' . $summary['cities'];
+            }
+            if ( ! empty( $summary['advantages'] ) ) {
+                $lines[] = 'مزایای پرتکرار: ' . $summary['advantages'];
+            }
+            if ( ! empty( $summary['disadvantages'] ) ) {
+                $lines[] = 'چالش‌های پرتکرار: ' . $summary['disadvantages'];
+            }
+        }
+
+        if ( ! empty( $context['records'] ) && is_array( $context['records'] ) ) {
+            $records = array_slice( $context['records'], 0, 3 );
+            $index   = 1;
+            foreach ( $records as $record ) {
+                if ( ! is_array( $record ) ) {
+                    continue;
+                }
+                $parts = array();
+                $parts[] = 'درآمد: ' . ( ! empty( $record['income'] ) ? $record['income'] : 'نامشخص' );
+                $parts[] = 'سرمایه: ' . ( ! empty( $record['investment'] ) ? $record['investment'] : 'نامشخص' );
+                if ( ! empty( $record['city'] ) ) {
+                    $parts[] = 'شهر: ' . $record['city'];
+                }
+                if ( ! empty( $record['advantages'] ) ) {
+                    $parts[] = 'مزایا: ' . $record['advantages'];
+                }
+                if ( ! empty( $record['disadvantages'] ) ) {
+                    $parts[] = 'معایب: ' . $record['disadvantages'];
+                }
+                $lines[] = 'نمونه تجربه ' . $index . ': ' . implode( ' | ', array_filter( array_map( 'trim', $parts ) ) );
+                if ( ! empty( $record['details'] ) ) {
+                    $lines[] = 'خلاصه تجربه: ' . $record['details'];
+                }
+                $index++;
+            }
+        }
+
+        $lines[] = 'پاسخ نهایی باید مرحله‌به‌مرحله، عدد-محور و بر اساس این داده‌ها باشد و اگر داده‌ای وجود ندارد حتماً «نامشخص/تقریبی» اعلام شود. موضوع گفتگو را تغییر نده.';
+
+        return implode( "\n", array_filter( array_map( 'trim', $lines ) ) );
+    }
+
+    protected static function format_job_context_reply( $context ) {
+        if ( empty( $context['job_title'] ) ) {
+            return '';
+        }
+
+        $title = $context['job_title'];
+        $lines = array();
+        $lines[] = "🔎 اطلاعات جمع‌بندی شده درباره «{$title}»:";
+        if ( ! empty( $context['summary'] ) && is_array( $context['summary'] ) ) {
+            $summary = $context['summary'];
+            if ( ! empty( $summary['income'] ) ) {
+                $lines[] = '• 💵 میانگین درآمد: ' . $summary['income'];
+            }
+            if ( ! empty( $summary['investment'] ) ) {
+                $lines[] = '• 💰 میانگین سرمایه اولیه: ' . $summary['investment'];
+            }
+            if ( ! empty( $summary['cities'] ) ) {
+                $lines[] = '• 📍 شهرهای پرتکرار: ' . $summary['cities'];
+            }
+            if ( ! empty( $summary['genders'] ) ) {
+                $lines[] = '• 👥 مناسب برای: ' . $summary['genders'];
+            }
+            if ( ! empty( $summary['advantages'] ) ) {
+                $lines[] = '• ⭐ مزایای پرتکرار: ' . $summary['advantages'];
+            }
+            if ( ! empty( $summary['disadvantages'] ) ) {
+                $lines[] = '• ⚠️ چالش‌های پرتکرار: ' . $summary['disadvantages'];
+            }
+        } else {
+            $lines[] = '• هنوز داده‌ای درباره این شغل ثبت نشده است.';
+        }
+
+        if ( ! empty( $context['records'] ) && is_array( $context['records'] ) ) {
+            $lines[] = '🧑‍💼 چند تجربه واقعی کاربران:';
+            foreach ( array_slice( $context['records'], 0, 2 ) as $record ) {
+                if ( ! is_array( $record ) ) {
+                    continue;
+                }
+                $parts = array();
+                if ( ! empty( $record['income'] ) ) {
+                    $parts[] = 'درآمد: ' . $record['income'];
+                }
+                if ( ! empty( $record['investment'] ) ) {
+                    $parts[] = 'سرمایه: ' . $record['investment'];
+                }
+                if ( ! empty( $record['city'] ) ) {
+                    $parts[] = 'شهر: ' . $record['city'];
+                }
+                if ( ! empty( $record['details'] ) ) {
+                    $parts[] = 'توضیح: ' . $record['details'];
+                }
+                if ( ! empty( $parts ) ) {
+                    $lines[] = '  - ' . implode( ' | ', $parts );
+                }
+            }
+        }
+
+        $lines[] = 'اگر بخش خاصی از این شغل برات مهمه بگو تا دقیق‌تر راهنمایی‌ات کنم.';
+        return implode( "\n", array_filter( array_map( 'trim', $lines ) ) );
+    }
+
+    protected static function build_followup_suggestions( $message, $context = array(), $answer = '' ) {
+        $suggestions = array();
+        $push = function( $text ) use ( &$suggestions ) {
+            $text = trim( (string) $text );
+            if ( $text && ! in_array( $text, $suggestions, true ) ) {
+                $suggestions[] = $text;
+            }
+        };
+
+        if ( ! empty( $context['job_title'] ) ) {
+            $title = $context['job_title'];
+            $push( "مهارت‌های ضروری برای موفقیت در «{$title}» چیست؟" );
+            $push( "یک نقشه راه چند مرحله‌ای برای ورود به «{$title}» پیشنهاد بده." );
+            $push( "شغل‌های مشابه «{$title}» با درآمد مناسب رو معرفی کن." );
+        }
+
+        if ( function_exists( 'mb_strtolower' ) ) {
+            $haystack = mb_strtolower( $message, 'UTF-8' );
+        } else {
+            $haystack = strtolower( $message );
+        }
+
+        $keywordSuggestions = array(
+            'سرمایه' => 'چه راهکارهایی برای کاهش سرمایه اولیه وجود دارد؟',
+            'درآمد'  => 'چطور می‌توانم درآمد این حوزه را بیشتر کنم؟',
+            'مهارت' => 'چه دوره یا منبعی برای یادگیری مهارت‌های لازم پیشنهاد می‌کنی؟',
+            'شهر'    => 'در کدام شهرها یا محیط‌های کاری می‌توان این شغل را راحت‌تر پیدا کرد؟',
+        );
+
+        foreach ( $keywordSuggestions as $keyword => $textSuggestion ) {
+            $found = function_exists( 'mb_strpos' ) ? mb_strpos( $haystack, $keyword ) : strpos( $haystack, $keyword );
+            if ( $found !== false ) {
+                $push( $textSuggestion );
+            }
+        }
+
+        $fallbacks = array(
+            'اگر بخوام مهارت‌هام رو برای این حوزه تقویت کنم از کجا شروع کنم؟',
+            'برای اینکه بدونم این شغل به شخصیت من می‌خوره چه سوالاتی ازم می‌پرسی؟',
+            'شغل یا کسب‌وکار دیگری که ارزش بررسی داشته باشه رو معرفی کن.',
+        );
+        foreach ( $fallbacks as $fallback ) {
+            $push( $fallback );
+        }
+
+        return array_slice( $suggestions, 0, 3 );
+    }
+
+    protected static function try_answer_from_db( $original_message, &$context = null, $model = '', $category = '', $normalized_message = null ) {
+        if ( null === $normalized_message ) {
+            $normalized_message = self::normalize_message( $original_message );
+        }
+
+        if ( null === $context ) {
+            $context = self::get_job_context( $normalized_message );
+        }
+
+        if ( empty( $context['job_title'] ) ) {
+            return null;
+        }
+
+        $reply = self::format_job_context_reply( $context );
+        if ( '' === trim( (string) $reply ) ) {
+            return null;
+        }
+
+        return self::build_response_payload(
+            $reply,
+            $context,
+            $original_message,
+            false,
+            'database',
+            array(
+                'model'              => self::resolve_model( $model ),
+                'category'           => is_string( $category ) ? $category : '',
+                'normalized_message' => $normalized_message,
+            )
+        );
+    }
+
+    protected static function build_response_payload( $text, $context, $message, $from_cache = false, $source = 'openai', $extra = array() ) {
+        $payload = array(
+            'text'         => (string) $text,
+            'suggestions'  => self::build_followup_suggestions( $message, $context, $text ),
+            'context_used' => ! empty( $context['job_title'] ),
+            'from_cache'   => (bool) $from_cache,
+            'source'       => $source,
+        );
+
+        if ( ! empty( $extra ) && is_array( $extra ) ) {
+            $payload = array_merge( $payload, $extra );
+        }
+
+        return $payload;
+    }
+
+    public static function delete_cache_for( $message, $category = '', $model = '' ) {
+        $key = self::build_cache_key( $message, $category, $model );
+        delete_transient( $key );
+    }
+
+    public static function extend_cache_ttl( $message, $category = '', $model = '', $ttl = 0 ) {
+        if ( ! self::is_cache_enabled() ) {
+            return;
+        }
+
+        $key      = self::build_cache_key( $message, $category, $model );
+        $payload  = get_transient( $key );
+        if ( false === $payload ) {
+            return;
+        }
+
+        $ttl = (int) $ttl;
+        if ( $ttl <= 0 ) {
+            $ttl = 3 * HOUR_IN_SECONDS;
+        }
+
+        set_transient( $key, $payload, $ttl );
+    }
+
+    public static function flush_cache_prefix( $prefix = 'bkja_cache_' ) {
+        global $wpdb;
+
+        if ( empty( $wpdb ) || empty( $wpdb->options ) ) {
+            return;
+        }
+
+        $like          = $wpdb->esc_like( $prefix ) . '%';
+        $transient_sql = $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s", '_transient_' . $like );
+        $timeout_sql   = $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s", '_transient_timeout_' . $like );
+
+        $wpdb->query( $transient_sql );
+        $wpdb->query( $timeout_sql );
+    }
+
+    public static function call_openai( $message, $args = array() ) {
+        if ( empty( $message ) ) {
+            return new WP_Error( 'empty_message', 'Message is empty' );
+        }
+
+        if ( class_exists( 'BKJA_Database' ) ) {
+            BKJA_Database::ensure_feedback_table();
+        }
+
+        $defaults = array(
+            'system'     => 'شما یک دستیار شغلی عدد-محور هستید. پاسخ‌ها را کوتاه، مرحله‌به‌مرحله و دقیق بده. اگر داده‌ای دقیق نداری صریح اعلام کن «نامشخص» یا «تقریبی» و موضوع گفتگو را تغییر نده.',
+            'model'      => '',
+            'session_id' => '',
+            'user_id'    => 0,
+            'category'   => '',
+        );
+        $args   = wp_parse_args( $args, $defaults );
+        $model  = self::resolve_model( $args['model'] );
+        $system = ! empty( $args['system'] ) ? $args['system'] : $defaults['system'];
+
+        $normalized_message = self::normalize_message( $message );
+        $context            = self::get_job_context( $normalized_message );
+
+        $db_payload = self::try_answer_from_db( $message, $context, $model, $args['category'], $normalized_message );
+        if ( $db_payload ) {
+            $db_payload['model']              = $model;
+            $db_payload['category']           = is_string( $args['category'] ) ? $args['category'] : '';
+            $db_payload['normalized_message'] = $normalized_message;
+            return $db_payload;
+        }
+
+        $cache_enabled = self::is_cache_enabled();
+        $cache_key     = self::build_cache_key( $normalized_message, $args['category'], $model );
+        if ( $cache_enabled ) {
+            $cached = get_transient( $cache_key );
+            if ( false !== $cached && self::should_accept_cached_payload( $normalized_message, $cached ) ) {
+                if ( is_array( $cached ) ) {
+                    $cached['from_cache']        = true;
+                    $cached['model']             = isset( $cached['model'] ) ? $cached['model'] : $model;
+                    $cached['category']          = is_string( $args['category'] ) ? $args['category'] : '';
+                    $cached['normalized_message'] = $normalized_message;
+                    return $cached;
+                }
+
+                return self::build_response_payload(
+                    $cached,
+                    $context,
+                    $message,
+                    true,
+                    'cache',
+                    array(
+                        'model'              => $model,
+                        'category'           => is_string( $args['category'] ) ? $args['category'] : '',
+                        'normalized_message' => $normalized_message,
+                    )
+                );
+            }
+        }
+
+        $api_key = self::get_api_key();
+        if ( empty( $api_key ) ) {
+            if ( ! empty( $context ) ) {
+                $fallback = self::build_response_payload(
+                    self::format_job_context_reply( $context ),
+                    $context,
+                    $message,
+                    false,
+                    'job_context',
+                    array(
+                        'model'              => $model,
+                        'category'           => is_string( $args['category'] ) ? $args['category'] : '',
+                        'normalized_message' => $normalized_message,
+                    )
+                );
+                if ( $cache_enabled ) {
+                    set_transient( $cache_key, $fallback, self::get_cache_ttl( $model ) );
+                }
+                return $fallback;
+            }
+
+            return new WP_Error( 'no_api_key', 'API key not configured' );
+        }
+
+        $messages = array(
+            array(
+                'role'    => 'system',
+                'content' => $system,
+            ),
+        );
+
+        if ( ! empty( $context ) ) {
+            $context_prompt = self::build_context_prompt( $context );
+            if ( $context_prompt ) {
+                $messages[] = array(
+                    'role'    => 'system',
+                    'content' => $context_prompt,
+                );
+            }
+        }
+
+        $feedback_hint = self::get_feedback_hint( $normalized_message, $args['session_id'], (int) $args['user_id'] );
+        if ( $feedback_hint ) {
+            $messages[] = array(
+                'role'    => 'system',
+                'content' => $feedback_hint,
+            );
+        }
+
+        if ( class_exists( 'BKJA_Database' ) ) {
+            $history = BKJA_Database::get_recent_conversation( $args['session_id'], (int) $args['user_id'], 6 );
+            $history = self::clamp_history( $history, 4 );
+            foreach ( $history as $item ) {
+                if ( empty( $item['content'] ) ) {
+                    continue;
+                }
+                $messages[] = array(
+                    'role'    => $item['role'] === 'assistant' ? 'assistant' : 'user',
+                    'content' => $item['content'],
+                );
+            }
+        }
+
+        $messages[] = array(
+            'role'    => 'user',
+            'content' => $message,
+        );
+
+        $payload = array(
+            'model'       => $model,
+            'messages'    => $messages,
+            'temperature' => 0.2,
+            'max_tokens'  => 500,
+        );
+
+        $request_args = array(
+            'headers' => array(
+                'Authorization' => 'Bearer ' . $api_key,
+                'Content-Type'  => 'application/json',
+            ),
+            'body'    => wp_json_encode( $payload ),
+            'timeout' => 60,
+        );
+
+        $response = wp_remote_post( 'https://api.openai.com/v1/chat/completions', $request_args );
+        if ( is_wp_error( $response ) ) {
+            if ( ! empty( $context ) ) {
+                $fallback = self::build_response_payload(
+                    self::format_job_context_reply( $context ),
+                    $context,
+                    $message,
+                    false,
+                    'job_context',
+                    array(
+                        'model'              => $model,
+                        'category'           => is_string( $args['category'] ) ? $args['category'] : '',
+                        'normalized_message' => $normalized_message,
+                    )
+                );
+                if ( $cache_enabled ) {
+                    set_transient( $cache_key, $fallback, self::get_cache_ttl( $model ) );
+                }
+                return $fallback;
+            }
+
+            return $response;
+        }
+
+        $code = wp_remote_retrieve_response_code( $response );
+        $body = wp_remote_retrieve_body( $response );
+        $data = json_decode( $body, true );
+
+        if ( $code < 200 || $code >= 300 || empty( $data['choices'][0]['message']['content'] ) ) {
+            if ( ! empty( $context ) ) {
+                $fallback = self::build_response_payload(
+                    self::format_job_context_reply( $context ),
+                    $context,
+                    $message,
+                    false,
+                    'job_context',
+                    array(
+                        'model'              => $model,
+                        'category'           => is_string( $args['category'] ) ? $args['category'] : '',
+                        'normalized_message' => $normalized_message,
+                    )
+                );
+                if ( $cache_enabled ) {
+                    set_transient( $cache_key, $fallback, self::get_cache_ttl( $model ) );
+                }
+                return $fallback;
+            }
+
+            return new WP_Error( 'api_error', 'OpenAI error: ' . substr( $body, 0, 250 ) );
+        }
+
+        $answer = trim( $data['choices'][0]['message']['content'] );
+        $source = 'openai';
+
+        if ( '' === $answer && ! empty( $context ) ) {
+            $answer = self::format_job_context_reply( $context );
+            $source = 'job_context';
+        } elseif ( '' === $answer ) {
+            return new WP_Error( 'empty_response', 'Empty response from model' );
+        }
+
+        $result = self::build_response_payload(
+            $answer,
+            $context,
+            $message,
+            false,
+            $source,
+            array(
+                'model'              => $model,
+                'category'           => is_string( $args['category'] ) ? $args['category'] : '',
+                'normalized_message' => $normalized_message,
+            )
+        );
+
+        if ( $cache_enabled ) {
+            set_transient( $cache_key, $result, self::get_cache_ttl( $model ) );
+        }
+
+        return $result;
+    }
+
+}
