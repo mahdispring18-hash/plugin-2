@@ -307,40 +307,118 @@ class BKJA_Chat {
             }
         };
 
+        $job_title = '';
         if ( ! empty( $context['job_title'] ) ) {
-            $title = $context['job_title'];
-            $push( "مهارت‌های ضروری برای موفقیت در «{$title}» چیست؟" );
-            $push( "یک نقشه راه چند مرحله‌ای برای ورود به «{$title}» پیشنهاد بده." );
-            $push( "شغل‌های مشابه «{$title}» با درآمد مناسب رو معرفی کن." );
+            $job_title = trim( (string) $context['job_title'] );
         }
 
-        if ( function_exists( 'mb_strtolower' ) ) {
-            $haystack = mb_strtolower( $message, 'UTF-8' );
-        } else {
-            $haystack = strtolower( $message );
-        }
+        $normalize = function( $text ) {
+            if ( ! is_string( $text ) ) {
+                $text = (string) $text;
+            }
 
-        $keywordSuggestions = array(
-            'سرمایه' => 'چه راهکارهایی برای کاهش سرمایه اولیه وجود دارد؟',
-            'درآمد'  => 'چطور می‌توانم درآمد این حوزه را بیشتر کنم؟',
-            'مهارت' => 'چه دوره یا منبعی برای یادگیری مهارت‌های لازم پیشنهاد می‌کنی؟',
-            'شهر'    => 'در کدام شهرها یا محیط‌های کاری می‌توان این شغل را راحت‌تر پیدا کرد؟',
+            if ( function_exists( 'mb_strtolower' ) ) {
+                $text = mb_strtolower( $text, 'UTF-8' );
+            } else {
+                $text = strtolower( $text );
+            }
+
+            return trim( preg_replace( '/\s+/u', ' ', $text ) );
+        };
+
+        $message_norm = $normalize( $message );
+        $answer_norm  = $normalize( $answer );
+
+        $topics = array(
+            'income'      => array( 'درآمد', 'حقوق', 'دستمزد' ),
+            'investment'  => array( 'سرمایه', 'هزینه', 'بودجه', 'تجهیز' ),
+            'skills'      => array( 'مهارت', 'آموزش', 'یادگیری', 'دوره' ),
+            'market'      => array( 'بازار', 'تقاضا', 'استخدام', 'فرصت' ),
+            'risk'        => array( 'چالش', 'ریسک', 'مشکل', 'دغدغه', 'سختی' ),
+            'growth'      => array( 'پیشرفت', 'رشد', 'مسیر', 'نقشه راه' ),
+            'tools'       => array( 'ابزار', 'گواهی', 'مدرک', 'تجهیزات' ),
+            'personality' => array( 'شخصیت', 'تیپ', 'روحیه' ),
+            'compare'     => array( 'مقایسه', 'جایگزین', 'مشابه', 'دیگر' ),
         );
 
-        foreach ( $keywordSuggestions as $keyword => $textSuggestion ) {
-            $found = function_exists( 'mb_strpos' ) ? mb_strpos( $haystack, $keyword ) : strpos( $haystack, $keyword );
-            if ( $found !== false ) {
-                $push( $textSuggestion );
+        $topic_state = array();
+        foreach ( $topics as $topic => $keywords ) {
+            $topic_state[ $topic ] = array(
+                'message' => false,
+                'answer'  => false,
+            );
+
+            foreach ( $keywords as $keyword ) {
+                $keyword = trim( $keyword );
+                if ( '' === $keyword ) {
+                    continue;
+                }
+
+                $found_in_message = function_exists( 'mb_strpos' )
+                    ? mb_strpos( $message_norm, $keyword )
+                    : strpos( $message_norm, $keyword );
+                $found_in_answer  = function_exists( 'mb_strpos' )
+                    ? mb_strpos( $answer_norm, $keyword )
+                    : strpos( $answer_norm, $keyword );
+
+                if ( false !== $found_in_message ) {
+                    $topic_state[ $topic ]['message'] = true;
+                }
+                if ( false !== $found_in_answer ) {
+                    $topic_state[ $topic ]['answer'] = true;
+                }
             }
         }
 
-        $fallbacks = array(
-            'اگر بخوام مهارت‌هام رو برای این حوزه تقویت کنم از کجا شروع کنم؟',
-            'برای اینکه بدونم این شغل به شخصیت من می‌خوره چه سوالاتی ازم می‌پرسی؟',
-            'شغل یا کسب‌وکار دیگری که ارزش بررسی داشته باشه رو معرفی کن.',
+        $job_fragment = $job_title ? "«{$job_title}»" : 'این حوزه';
+
+        $topic_prompts = array(
+            'income'     => "حدود درآمد {$job_fragment} در سطوح مختلف تجربه چقدر است؟",
+            'investment' => "برای شروع {$job_fragment} چه مقدار سرمایه و تجهیزات لازم است؟",
+            'skills'     => "چه مهارت‌های نرم و سختی برای موفقیت در {$job_fragment} ضروری است؟",
+            'market'     => "چشم‌انداز بازار کار {$job_fragment} در یک تا سه سال آینده چگونه است؟",
+            'risk'       => "مهم‌ترین چالش‌ها و ریسک‌های {$job_fragment} چیست و چطور باید مدیریت‌شان کرد؟",
+            'growth'     => "یک نقشه راه مرحله‌به‌مرحله برای پیشرفت در {$job_fragment} پیشنهاد بده.",
+            'tools'      => "کدام ابزار، گواهی یا دوره برای شروع {$job_fragment} توصیه می‌شود؟",
         );
-        foreach ( $fallbacks as $fallback ) {
-            $push( $fallback );
+
+        foreach ( $topic_prompts as $topic => $prompt ) {
+            if ( empty( $topic_state[ $topic ] ) ) {
+                continue;
+            }
+
+            $was_asked   = ! empty( $topic_state[ $topic ]['message'] );
+            $was_answered = ! empty( $topic_state[ $topic ]['answer'] );
+
+            if ( $was_asked && ! $was_answered ) {
+                $push( $prompt );
+            }
+        }
+
+        if ( $job_title ) {
+            if ( empty( $topic_state['skills']['answer'] ) ) {
+                $push( "برای موفقیت در {$job_fragment} چه مهارت‌هایی را باید از همین حالا تمرین کنم؟" );
+            }
+            if ( empty( $topic_state['market']['answer'] ) ) {
+                $push( "بازار کار {$job_fragment} در ایران و خارج چه تفاوت‌هایی دارد؟" );
+            }
+            if ( empty( $topic_state['risk']['answer'] ) ) {
+                $push( "بزرگ‌ترین اشتباهات رایج در مسیر {$job_fragment} چیست و چطور از آن‌ها دوری کنم؟" );
+            }
+            if ( empty( $topic_state['compare']['message'] ) ) {
+                $push( "شغل‌های جایگزین نزدیک به {$job_fragment} که ارزش بررسی دارند را معرفی کن." );
+            }
+        }
+
+        if ( empty( $suggestions ) ) {
+            if ( empty( $topic_state['personality']['message'] ) ) {
+                if ( $job_title ) {
+                    $push( "آیا {$job_fragment} با ویژگی‌های شخصیتی من هماهنگ است؟ اگر لازم است سوال بپرس." );
+                } else {
+                    $push( 'اگر بخوای بررسی کنی این حوزه با شخصیت من هماهنگ است از چه سوالاتی شروع می‌کنی؟' );
+                }
+            }
+            $push( 'به من کمک کن بدانم قدم بعدی منطقی برای تحقیق بیشتر درباره این موضوع چیست.' );
         }
 
         return array_slice( $suggestions, 0, 3 );
@@ -385,6 +463,7 @@ class BKJA_Chat {
             'context_used' => ! empty( $context['job_title'] ),
             'from_cache'   => (bool) $from_cache,
             'source'       => $source,
+            'job_title'    => ! empty( $context['job_title'] ) ? $context['job_title'] : '',
         );
 
         if ( ! empty( $extra ) && is_array( $extra ) ) {

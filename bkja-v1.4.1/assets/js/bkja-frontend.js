@@ -24,6 +24,21 @@
         var $form = $('#bkja-chat-form');
         var $input = $('#bkja-user-message');
         var $messages = $('.bkja-messages');
+        var lastKnownJobTitle = '';
+        var lastReplyMeta = {};
+        var personalityFlow = {
+            active: false,
+            awaitingResult: false,
+            step: 0,
+            jobTitle: '',
+            answers: [],
+            questions: [
+                { id: 'interests', text: 'بیشتر به چه نوع کارها یا فعالیت‌هایی علاقه داری؟' },
+                { id: 'environment', text: 'چه محیط کاری (مثلاً کارگاهی، اداری، تیمی یا مستقل) برایت انگیزه‌بخش‌تر است؟' },
+                { id: 'skills', text: 'مهم‌ترین مهارت یا نقطه قوتی که در کار داری چیه؟' },
+                { id: 'stress', text: 'وقتی با شرایط پرتنش یا غیرقابل‌پیش‌بینی مواجه می‌شی چطور واکنش می‌دی؟' }
+            ]
+        };
 
         function getSessionId(){ 
             var s = localStorage.getItem('bkja_session_id'); 
@@ -88,8 +103,11 @@
             $('.bkja-followups').remove();
         }
 
-        function renderFollowups(items){
-            if(!Array.isArray(items) || !items.length) return;
+        function renderFollowups(items, meta){
+            removeFollowups();
+            if(!Array.isArray(items) || !items.length){
+                items = [];
+            }
             var unique = [];
             items.forEach(function(item){
                 if(item === null || item === undefined) return;
@@ -98,7 +116,18 @@
                     unique.push(text);
                 }
             });
-            if(!unique.length) return;
+            var metaJob = meta && meta.job_title ? $.trim(meta.job_title) : '';
+            if(!unique.length && metaJob){
+                var jobFragment = '«' + metaJob + '»';
+                unique.push('اگر بخوام بررسی کنم آیا ' + jobFragment + ' برای من مناسبه از کجا شروع کنم؟');
+                unique.push('برای موفقیت در ' + jobFragment + ' چه مهارت‌هایی رو باید تقویت کنم؟');
+            }
+            if(!unique.length){
+                return [];
+            }
+            if(unique.length > 3){
+                unique = unique.slice(0,3);
+            }
             var $wrap = $('<div class="bkja-followups" role="list"></div>');
             unique.forEach(function(text){
                 var $btn = $('<button type="button" class="bkja-followup-btn" role="listitem"></button>');
@@ -113,6 +142,7 @@
             });
             $messages.append($wrap);
             $messages.scrollTop($messages.prop('scrollHeight'));
+            return unique;
         }
 
         function appendResponseMeta(text){
@@ -122,7 +152,7 @@
             $messages.scrollTop($messages.prop('scrollHeight'));
         }
 
-        function attachFeedbackControls($bubble, meta, userMessage, responseText){
+        function attachFeedbackControls($bubble, meta, userMessage, responseText, options){
             if(!$bubble || !$bubble.length || !config.ajax_url){
                 return;
             }
@@ -136,8 +166,18 @@
                 return;
             }
 
+            options = options || {};
+            var highlight = !!options.highlight;
+            var autoOpen = !!options.autoOpen;
+
             var $wrap = $('<div class="bkja-feedback-wrap"></div>');
-            var $controls = $('<div class="bkja-feedback-controls" role="group" aria-label="بازخورد پاسخ"></div>');
+            var $cta = $('<button type="button" class="bkja-feedback-cta" aria-expanded="false"></button>');
+            $cta.text(highlight ? 'نظرت درباره این پاسخ چیه؟' : 'ثبت بازخورد پاسخ');
+            if(highlight){
+                $cta.addClass('bkja-feedback-cta-highlight');
+            }
+
+            var $controls = $('<div class="bkja-feedback-controls" role="group" aria-label="بازخورد پاسخ" style="display:none;"></div>');
             var $like = $('<button type="button" class="bkja-feedback-btn like" aria-label="پاسخ مفید بود">👍</button>');
             var $dislike = $('<button type="button" class="bkja-feedback-btn dislike" aria-label="پاسخ نیاز به بهبود دارد">👎</button>');
             var $improve = $('<button type="button" class="bkja-feedback-toggle" aria-expanded="false">بهبود این پاسخ</button>');
@@ -148,11 +188,30 @@
             $extra.append($tags).append($comment);
 
             $controls.append($like).append($dislike).append($improve).append($status);
-            $wrap.append($controls).append($extra);
+            $wrap.append($cta).append($controls).append($extra);
             $bubble.after($wrap);
             $bubble.data('bkja-feedback', true);
 
             var sending = false;
+            var controlsVisible = false;
+
+            function openControls(){
+                if(controlsVisible){
+                    return;
+                }
+                controlsVisible = true;
+                $controls.slideDown(150);
+                $cta.attr('aria-expanded','true').addClass('bkja-feedback-cta-open');
+                $cta.removeClass('bkja-feedback-cta-highlight');
+            }
+
+            $cta.on('click', function(){
+                if(sending){ return; }
+                if(controlsVisible){
+                    return;
+                }
+                openControls();
+            });
 
             function sendFeedback(vote){
                 if(sending){ return; }
@@ -181,6 +240,7 @@
                         $improve.prop('disabled', true);
                         $tags.prop('disabled', true);
                         $comment.prop('disabled', true);
+                        $cta.prop('disabled', true).addClass('bkja-feedback-cta-disabled').text('بازخورد ثبت شد ✅');
                     } else {
                         $status.text('خطا در ثبت بازخورد. دوباره تلاش کنید.');
                     }
@@ -191,10 +251,12 @@
             }
 
             $like.on('click', function(){
+                openControls();
                 sendFeedback(1);
             });
 
             $dislike.on('click', function(){
+                openControls();
                 if($extra.is(':hidden')){
                     $extra.slideDown(150);
                     $improve.attr('aria-expanded','true');
@@ -207,6 +269,10 @@
                 $extra.slideToggle(150);
                 $(this).attr('aria-expanded', (!isOpen).toString());
             });
+
+            if(autoOpen){
+                setTimeout(function(){ openControls(); }, 80);
+            }
         }
 
         if($form.length){
@@ -278,24 +344,151 @@
                                         $(this).toggleClass('open');
                                     });
 
-            $form.on('submit', function(e){
-                e.preventDefault();
-                var msg = $input.val().trim();
-                if(!msg) return;
-                removeFollowups();
-                pushUser(msg);
-                $input.val('');
-                $.post(config.ajax_url, {
+            function normalizeForMatch(text){
+                if(text === null || text === undefined){
+                    return '';
+                }
+                return String(text).replace(/[\s‌]+/g,' ').trim().toLowerCase();
+            }
+
+            function shouldStartPersonalityFlow(message){
+                if(personalityFlow.active || personalityFlow.awaitingResult){
+                    return false;
+                }
+                var normalized = normalizeForMatch(message);
+                if(!normalized){
+                    return false;
+                }
+                if(normalized.indexOf('شخصیت') === -1 && normalized.indexOf('تیپ') === -1 && normalized.indexOf('روحیه') === -1){
+                    return false;
+                }
+                var verbs = ['میخوره','می‌خوره','هماهنگ','سازگار','مناسب','میاد','ارزیابی'];
+                var verbFound = false;
+                for(var i=0;i<verbs.length;i++){
+                    if(normalized.indexOf(verbs[i]) !== -1){
+                        verbFound = true;
+                        break;
+                    }
+                }
+                if(!verbFound){
+                    return false;
+                }
+                if(normalized.indexOf('شغل') === -1 && normalized.indexOf('کار') === -1 && !lastKnownJobTitle){
+                    return false;
+                }
+                return true;
+            }
+
+            function extractJobTitleFromMessage(message){
+                if(!message){
+                    return lastKnownJobTitle || '';
+                }
+                var job = '';
+                var match = message.match(/شغل\s*(?:«|"|\')?\s*([^»"'؟\?\n]+?)(?:»|"|\'|\s|\?|؟|$)/);
+                if(match && match[1]){
+                    job = $.trim(match[1]);
+                }
+                if(!job){
+                    match = message.match(/(?:درباره|در مورد|راجع|راجب|خصوص|حوزه)\s+([^\?\!\n]+?)(?:\s*(?:چی|چیه|است|می|؟|\?|$))/);
+                    if(match && match[1]){
+                        job = $.trim(match[1]);
+                    }
+                }
+                if(!job){
+                    job = lastKnownJobTitle || '';
+                }
+                return job;
+            }
+
+            function askNextPersonalityQuestion(){
+                if(!personalityFlow.active){
+                    return;
+                }
+                if(personalityFlow.step >= personalityFlow.questions.length){
+                    completePersonalityFlow();
+                    return;
+                }
+                var q = personalityFlow.questions[personalityFlow.step];
+                pushBot('سوال ' + (personalityFlow.step + 1) + ') ' + q.text);
+            }
+
+            function startPersonalityFlow(initialMessage){
+                personalityFlow.active = true;
+                personalityFlow.awaitingResult = false;
+                personalityFlow.answers = [];
+                personalityFlow.step = 0;
+                personalityFlow.jobTitle = extractJobTitleFromMessage(initialMessage) || 'این شغل';
+                if(personalityFlow.jobTitle && personalityFlow.jobTitle !== 'این شغل'){
+                    lastKnownJobTitle = personalityFlow.jobTitle;
+                }
+                var jobFragment = personalityFlow.jobTitle === 'این شغل' ? personalityFlow.jobTitle : 'شغل «' + personalityFlow.jobTitle + '»';
+                pushBot('برای اینکه بفهمیم ' + jobFragment + ' با ویژگی‌هات هماهنگ است چند سوال کوتاه ازت می‌پرسم. لطفاً کوتاه و صادقانه جواب بده.', {
+                    onComplete: function(){
+                        setTimeout(function(){ askNextPersonalityQuestion(); }, 260);
+                    }
+                });
+            }
+
+            function handlePersonalityAnswer(answer){
+                if(!personalityFlow.active){
+                    return;
+                }
+                var q = personalityFlow.questions[personalityFlow.step];
+                personalityFlow.answers.push({ question: q.text, answer: answer });
+                personalityFlow.step += 1;
+                if(personalityFlow.step < personalityFlow.questions.length){
+                    setTimeout(function(){ askNextPersonalityQuestion(); }, 260);
+                } else {
+                    completePersonalityFlow();
+                }
+            }
+
+            function completePersonalityFlow(){
+                if(personalityFlow.awaitingResult){
+                    return;
+                }
+                personalityFlow.active = false;
+                personalityFlow.awaitingResult = true;
+                var job = personalityFlow.jobTitle || lastKnownJobTitle || 'این شغل';
+                var jobFragment = job === 'این شغل' ? job : 'شغل «' + job + '»';
+                var summary = personalityFlow.answers.map(function(item, idx){
+                    return (idx + 1) + '. ' + item.question + ' => ' + item.answer;
+                }).join('\n');
+                var prompt = 'می‌خوام بررسی کنی آیا ' + jobFragment + ' با شخصیت و ترجیحات من تناسب دارد یا نه.' +
+                    '\nپاسخ‌های من به سوالات شخصیت‌شناسی:' + '\n' + summary + '\n' +
+                    'لطفاً نتیجه را در سه بخش «تناسب کلی»، «دلایل سازگاری یا عدم سازگاری»، و «پیشنهاد قدم بعدی» ارائه بده و اگر این شغل مناسب نیست چند گزینه جایگزین مرتبط معرفی کن.';
+                pushBot('سپاس از پاسخ‌هات! دارم بررسی می‌کنم که این شغل با روحیه‌ات هماهنگ هست یا نه...', {
+                    onComplete: function(){
+                        removeFollowups();
+                        sendMessageToServer(prompt, { contextMessage: prompt, highlightFeedback: true });
+                        personalityFlow.answers = [];
+                    }
+                });
+            }
+
+            function sendMessageToServer(message, opts){
+                opts = opts || {};
+                var contextMessage = opts.contextMessage || message;
+                var payload = {
                     action: 'bkja_send_message',
                     nonce: config.nonce,
-                    message: msg,
+                    message: message,
                     session: sessionId
-                }, function(res){
+                };
+                if(opts.category){
+                    payload.category = opts.category;
+                }
+                $.post(config.ajax_url, payload, function(res){
+                    personalityFlow.awaitingResult = false;
                     if(res && res.success){
                         var reply = res.data.reply || '';
                         var suggestions = Array.isArray(res.data.suggestions) ? res.data.suggestions : [];
                         var fromCache = !!res.data.from_cache;
                         var meta = res.data.meta || {};
+                        if(meta.job_title){
+                            lastKnownJobTitle = meta.job_title;
+                        }
+                        lastReplyMeta = meta;
                         pushBot(reply, {
                             onComplete: function($bubble){
                                 if(fromCache){
@@ -308,16 +501,21 @@
                                 } else if(meta.context_used && meta.source === 'openai'){
                                     appendResponseMeta('📊 برای این پاسخ از داده‌های داخلی ثبت‌شده استفاده شد.');
                                 }
-                                attachFeedbackControls($bubble, meta, msg, reply);
-                                renderFollowups(suggestions);
+                                var finalSuggestions = renderFollowups(suggestions, meta);
+                                var highlightFeedback = !!opts.highlightFeedback || finalSuggestions.length === 0;
+                                if(reply && reply.length){
+                                    attachFeedbackControls($bubble, meta, contextMessage, reply, { highlight: highlightFeedback });
+                                }
                             }
                         });
                     } else if(res && res.error === 'guest_limit'){
-                        pushBotHtml('<div style="color:#d32f2f;font-weight:700;padding:12px 0;">برای ادامه گفتگو باید عضو سایت شوید.<br> <a href="'+(res.login_url||'/wp-login.php')+'" style="color:#1976d2;text-decoration:underline;font-weight:700;">ورود یا ثبت‌نام</a></div>');
+                        var loginUrl = (res.login_url || '/wp-login.php');
+                        pushBotHtml('<div style="color:#d32f2f;font-weight:700;padding:12px 0;">برای ادامه گفتگو باید عضو سایت شوید.<br> <a href="'+loginUrl+'" style="color:#1976d2;text-decoration:underline;font-weight:700;">ورود یا ثبت‌نام</a></div>');
                     } else {
                         pushBot('خطا در پاسخ');
                     }
                 }).fail(function(xhr){
+                    personalityFlow.awaitingResult = false;
                     if(xhr && xhr.responseJSON && xhr.responseJSON.error === 'guest_limit'){
                         var res = xhr.responseJSON;
                         pushBotHtml('<div style="color:#d32f2f;font-weight:700;padding:12px 0;">برای ادامه گفتگو باید عضو سایت شوید.<br> <a href="'+(res.login_url||'/wp-login.php')+'" style="color:#1976d2;text-decoration:underline;font-weight:700;">ورود یا ثبت‌نام</a></div>');
@@ -325,6 +523,27 @@
                         pushBot('خطا در ارتباط با سرور');
                     }
                 });
+            }
+
+            $form.on('submit', function(e){
+                e.preventDefault();
+                var msg = $input.val().trim();
+                if(!msg) return;
+                removeFollowups();
+                if(personalityFlow.awaitingResult){
+                    personalityFlow.awaitingResult = false;
+                }
+                pushUser(msg);
+                $input.val('');
+                if(personalityFlow.active){
+                    handlePersonalityAnswer(msg);
+                    return;
+                }
+                if(shouldStartPersonalityFlow(msg)){
+                    startPersonalityFlow(msg);
+                    return;
+                }
+                sendMessageToServer(msg, { contextMessage: msg });
             });
         }
 
