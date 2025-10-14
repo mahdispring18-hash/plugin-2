@@ -299,11 +299,14 @@ class BKJA_Chat {
     }
 
     // دریافت خلاصه و رکوردهای شغل مرتبط با پیام
-    public static function get_job_context($message) {
+    public static function get_job_context($message, $job_title_hint = '', $job_slug = '') {
         global $wpdb;
 
         $normalized = self::normalize_message( $message );
-        if ( '' === $normalized ) {
+        $job_title_hint = is_string( $job_title_hint ) ? trim( $job_title_hint ) : '';
+        $job_slug = is_string( $job_slug ) ? trim( $job_slug ) : '';
+
+        if ( '' === $normalized && '' === $job_title_hint && '' === $job_slug ) {
             return array();
         }
 
@@ -319,7 +322,41 @@ class BKJA_Chat {
             }
         }
 
-        $job_title = self::resolve_job_title_from_message( $normalized, $table, $title_column );
+        $job_title = '';
+
+        if ( '' !== $normalized ) {
+            $job_title = self::resolve_job_title_from_message( $normalized, $table, $title_column );
+        }
+
+        if ( '' === $job_title && '' !== $job_title_hint ) {
+            $exact = $wpdb->get_row(
+                $wpdb->prepare(
+                    "SELECT {$title_column} AS job_title FROM {$table} WHERE {$title_column} = %s LIMIT 1",
+                    $job_title_hint
+                )
+            );
+
+            if ( $exact && ! empty( $exact->job_title ) ) {
+                $job_title = $exact->job_title;
+            } else {
+                $hint_normalized = self::normalize_lookup_text( $job_title_hint );
+                if ( '' !== $hint_normalized ) {
+                    $job_title = self::resolve_job_title_from_message( $hint_normalized, $table, $title_column );
+                    if ( '' === $job_title ) {
+                        $exact_hint = $wpdb->get_row(
+                            $wpdb->prepare(
+                                "SELECT {$title_column} AS job_title FROM {$table} WHERE {$title_column} = %s LIMIT 1",
+                                $hint_normalized
+                            )
+                        );
+                        if ( $exact_hint && ! empty( $exact_hint->job_title ) ) {
+                            $job_title = $exact_hint->job_title;
+                        }
+                    }
+                }
+            }
+        }
+
         if ( '' === $job_title ) {
             return array();
         }
@@ -329,7 +366,8 @@ class BKJA_Chat {
         return [
             'job_title' => $job_title,
             'summary'   => $summary,
-            'records'   => $records
+            'records'   => $records,
+            'job_slug'  => '' !== $job_slug ? $job_slug : null
         ];
     }
 
@@ -576,13 +614,13 @@ class BKJA_Chat {
         return array_slice( $suggestions, 0, 3 );
     }
 
-    protected static function try_answer_from_db( $original_message, &$context = null, $model = '', $category = '', $normalized_message = null ) {
+    protected static function try_answer_from_db( $original_message, &$context = null, $model = '', $category = '', $normalized_message = null, $job_title_hint = '', $job_slug = '' ) {
         if ( null === $normalized_message ) {
             $normalized_message = self::normalize_message( $original_message );
         }
 
         if ( null === $context ) {
-            $context = self::get_job_context( $normalized_message );
+            $context = self::get_job_context( $normalized_message, $job_title_hint, $job_slug );
         }
 
         if ( empty( $context['job_title'] ) ) {
@@ -692,21 +730,25 @@ class BKJA_Chat {
         }
 
         $defaults = array(
-            'system'     => 'شما یک دستیار شغلی عدد-محور هستید. پاسخ‌ها را کوتاه، مرحله‌به‌مرحله و دقیق بده. اگر داده‌ای دقیق نداری صریح اعلام کن «نامشخص» یا «تقریبی» و موضوع گفتگو را تغییر نده.',
-            'model'      => '',
-            'session_id' => '',
-            'user_id'    => 0,
-            'category'   => '',
+            'system'         => 'شما یک دستیار شغلی عدد-محور هستید. پاسخ‌ها را کوتاه، مرحله‌به‌مرحله و دقیق بده. اگر داده‌ای دقیق نداری صریح اعلام کن «نامشخص» یا «تقریبی» و موضوع گفتگو را تغییر نده.',
+            'model'          => '',
+            'session_id'     => '',
+            'user_id'        => 0,
+            'category'       => '',
+            'job_title_hint' => '',
+            'job_slug'       => '',
         );
         $args              = wp_parse_args( $args, $defaults );
         $model             = self::resolve_model( $args['model'] );
         $system            = ! empty( $args['system'] ) ? $args['system'] : $defaults['system'];
         $resolved_category = is_string( $args['category'] ) ? $args['category'] : '';
+        $job_title_hint    = is_string( $args['job_title_hint'] ) ? trim( $args['job_title_hint'] ) : '';
+        $job_slug          = is_string( $args['job_slug'] ) ? trim( $args['job_slug'] ) : '';
 
         $normalized_message = self::normalize_message( $message );
-        $context            = self::get_job_context( $normalized_message );
+        $context            = self::get_job_context( $normalized_message, $job_title_hint, $job_slug );
 
-        $db_payload = self::try_answer_from_db( $message, $context, $model, $resolved_category, $normalized_message );
+        $db_payload = self::try_answer_from_db( $message, $context, $model, $resolved_category, $normalized_message, $job_title_hint, $job_slug );
         if ( $db_payload ) {
             $db_payload['model']              = $model;
             $db_payload['category']           = $resolved_category;
