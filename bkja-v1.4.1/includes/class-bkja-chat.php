@@ -19,6 +19,161 @@ class BKJA_Chat {
         return trim( (string) $message );
     }
 
+    protected static function normalize_lookup_text( $text ) {
+        $text = self::normalize_message( $text );
+
+        if ( '' === $text ) {
+            return '';
+        }
+
+        $replacements = array(
+            'ي' => 'ی',
+            'ك' => 'ک',
+            'ة' => 'ه',
+            'ۀ' => 'ه',
+            'ؤ' => 'و',
+            'إ' => 'ا',
+            'أ' => 'ا',
+            'آ' => 'ا',
+        );
+
+        $text = strtr( $text, $replacements );
+        $text = str_replace(
+            array( '‌', "\xE2\x80\x8C", '-', '–', '—', '_', '/', '\\', '(', ')', '[', ']', '{', '}', '«', '»', '"', '\'', ':' ),
+            ' ',
+            $text
+        );
+        $text = preg_replace( '/\s+/u', ' ', $text );
+
+        return trim( (string) $text );
+    }
+
+    protected static function build_job_lookup_phrases( $normalized_message ) {
+        $text = self::normalize_lookup_text( $normalized_message );
+
+        if ( '' === $text ) {
+            return array();
+        }
+
+        $phrases = array( $text );
+
+        $stopwords = array(
+            'در','برای','به','از','که','چی','چیه','چه','چطور','چگونه','چقدر','چقد','چقدره','درآمد','درامد','درآمدش','درامدش','سرمایه','حقوق','میخوام','می‌خوام','میخواهم','میخواستم','میخوای','میخواید','میشه','می','من','کنم','کن','کردن','کرد','شروع','قدم','بعدی','منطقی','بیشتر','تحقیق','موضوع','حرفه','حوزه','شغل','کار','رشته','درمورد','درباره','اطلاعات','را','با','و','یا','اگر','آیا','ایا','است','نیست','هست','هستن','هستش','کج','کجاست','چیکار','چکار','بگو','بگید','نیاز','دارم','داریم','مورد','برا','برام','براش','براشون','توضیح','لطفا','لطفاً','معرفی','چند','چندتا','چندمه','پول','هزینه','هزینه‌','چیا','سود','درآمدزایی'
+        );
+
+        $words = preg_split( '/[\s،,.!?؟]+/u', $text );
+        $words = array_filter( array_map( 'trim', $words ), function ( $word ) use ( $stopwords ) {
+            if ( '' === $word ) {
+                return false;
+            }
+
+            $check = function_exists( 'mb_strtolower' )
+                ? mb_strtolower( $word, 'UTF-8' )
+                : strtolower( $word );
+
+            if ( in_array( $check, $stopwords, true ) ) {
+                return false;
+            }
+
+            if ( function_exists( 'mb_strlen' ) ) {
+                return mb_strlen( $word, 'UTF-8' ) >= 2;
+            }
+
+            return strlen( $word ) >= 2;
+        } );
+
+        $words = array_values( $words );
+        $count = count( $words );
+
+        if ( $count > 0 ) {
+            $max_chunk = min( 4, $count );
+            for ( $len = $max_chunk; $len >= 1; $len-- ) {
+                for ( $i = 0; $i <= $count - $len; $i++ ) {
+                    $chunk = implode( ' ', array_slice( $words, $i, $len ) );
+                    $chunk = trim( $chunk );
+                    if ( '' === $chunk ) {
+                        continue;
+                    }
+
+                    if ( function_exists( 'mb_strlen' ) ) {
+                        if ( mb_strlen( $chunk, 'UTF-8' ) < 2 ) {
+                            continue;
+                        }
+                    } elseif ( strlen( $chunk ) < 2 ) {
+                        continue;
+                    }
+
+                    $phrases[] = $chunk;
+                }
+            }
+        }
+
+        $phrases = array_values( array_unique( $phrases ) );
+
+        usort( $phrases, function ( $a, $b ) {
+            $len_a = function_exists( 'mb_strlen' ) ? mb_strlen( $a, 'UTF-8' ) : strlen( $a );
+            $len_b = function_exists( 'mb_strlen' ) ? mb_strlen( $b, 'UTF-8' ) : strlen( $b );
+
+            if ( $len_a === $len_b ) {
+                return 0;
+            }
+
+            return ( $len_a < $len_b ) ? 1 : -1;
+        } );
+
+        return $phrases;
+    }
+
+    protected static function resolve_job_title_from_message( $normalized_message, $table, $title_column ) {
+        global $wpdb;
+
+        static $cache = array();
+
+        $cache_key = md5( $normalized_message . '|' . $table . '|' . $title_column );
+        if ( isset( $cache[ $cache_key ] ) ) {
+            return $cache[ $cache_key ];
+        }
+
+        $job_title = '';
+        $phrases   = self::build_job_lookup_phrases( $normalized_message );
+
+        foreach ( $phrases as $phrase ) {
+            $like = '%' . $wpdb->esc_like( $phrase ) . '%';
+            $row  = $wpdb->get_row(
+                $wpdb->prepare(
+                    "SELECT {$title_column} AS job_title FROM {$table} WHERE {$title_column} LIKE %s ORDER BY CHAR_LENGTH({$title_column}) ASC LIMIT 1",
+                    $like
+                )
+            );
+
+            if ( $row && ! empty( $row->job_title ) ) {
+                $job_title = $row->job_title;
+                break;
+            }
+        }
+
+        if ( '' === $job_title ) {
+            $compact = preg_replace( '/\s+/u', '', self::normalize_lookup_text( $normalized_message ) );
+            if ( '' !== $compact ) {
+                $like = '%' . $wpdb->esc_like( $compact ) . '%';
+                $row  = $wpdb->get_row(
+                    $wpdb->prepare(
+                        "SELECT {$title_column} AS job_title FROM {$table} WHERE REPLACE(REPLACE(REPLACE({$title_column}, '‌', ''), ' ', ''), '-', '') LIKE %s LIMIT 1",
+                        $like
+                    )
+                );
+
+                if ( $row && ! empty( $row->job_title ) ) {
+                    $job_title = $row->job_title;
+                }
+            }
+        }
+
+        $cache[ $cache_key ] = $job_title;
+
+        return $job_title;
+    }
+
     public static function resolve_model( $maybe = '' ) {
         $maybe = is_string( $maybe ) ? trim( $maybe ) : '';
         if ( $maybe && in_array( $maybe, self::$allowed_models, true ) ) {
@@ -164,13 +319,10 @@ class BKJA_Chat {
             }
         }
 
-        $like = '%' . $wpdb->esc_like( $normalized ) . '%';
-        $row  = $wpdb->get_row( $wpdb->prepare( "SELECT {$title_column} AS job_title FROM {$table} WHERE {$title_column} LIKE %s LIMIT 1", $like ) );
-        if ( ! $row || empty( $row->job_title ) ) {
+        $job_title = self::resolve_job_title_from_message( $normalized, $table, $title_column );
+        if ( '' === $job_title ) {
             return array();
         }
-
-        $job_title = $row->job_title;
 
         $summary = class_exists('BKJA_Database') ? BKJA_Database::get_job_summary($job_title) : null;
         $records = class_exists('BKJA_Database') ? BKJA_Database::get_job_records($job_title, 5, 0) : [];
