@@ -188,16 +188,21 @@ class BKJA_Chat {
         return 'gpt-4o-mini';
     }
 
-    public static function build_cache_key( $message, $category = '', $model = '' ) {
+    public static function build_cache_key( $message, $category = '', $model = '', $job_title = '' ) {
         $normalized = self::normalize_message( $message );
         $category   = is_string( $category ) ? trim( $category ) : '';
         $model      = self::resolve_model( $model );
+        $job_title  = is_string( $job_title ) ? trim( $job_title ) : '';
 
         $parts = array(
             'msg:' . $normalized,
             'cat:' . $category,
             'm:' . $model,
         );
+
+        if ( '' !== $job_title ) {
+            $parts[] = 'job:' . self::normalize_message( $job_title );
+        }
 
         return 'bkja_cache_' . md5( implode( '|', $parts ) );
     }
@@ -653,6 +658,8 @@ class BKJA_Chat {
             array(
                 'model'              => self::resolve_model( $model ),
                 'category'           => is_string( $category ) ? $category : '',
+                'job_title'          => ! empty( $context['job_title'] ) ? $context['job_title'] : '',
+                'job_slug'           => isset( $context['job_slug'] ) ? $context['job_slug'] : '',
                 'normalized_message' => $normalized_message,
             )
         );
@@ -668,6 +675,7 @@ class BKJA_Chat {
             'from_cache'   => (bool) $from_cache,
             'source'       => $source,
             'job_title'    => ! empty( $context['job_title'] ) ? $context['job_title'] : '',
+            'job_slug'     => isset( $context['job_slug'] ) ? $context['job_slug'] : '',
         );
 
         if ( ! empty( $extra ) && is_array( $extra ) ) {
@@ -681,30 +689,57 @@ class BKJA_Chat {
             $resolved_category = $extra['category'];
         }
 
+        $resolved_job_title = null;
+        if ( ! empty( $context['job_title'] ) ) {
+            $resolved_job_title = $context['job_title'];
+        } elseif ( isset( $payload['job_title'] ) && '' !== $payload['job_title'] ) {
+            $resolved_job_title = $payload['job_title'];
+        }
+
+        $resolved_job_slug = null;
+        if ( isset( $context['job_slug'] ) && '' !== $context['job_slug'] ) {
+            $resolved_job_slug = $context['job_slug'];
+        } elseif ( isset( $payload['job_slug'] ) && '' !== $payload['job_slug'] ) {
+            $resolved_job_slug = $payload['job_slug'];
+        }
+
         $payload['meta'] = array(
             'context_used' => $context_used,
             'from_cache'   => (bool) $from_cache,
             'source'       => $source,
             'category'     => $resolved_category,
-            'job_title'    => isset( $context['job_title'] ) ? $context['job_title'] : null,
-            'job_slug'     => isset( $context['job_slug'] ) ? $context['job_slug'] : null,
+            'job_title'    => $resolved_job_title,
+            'job_slug'     => $resolved_job_slug,
         );
 
         return $payload;
     }
 
-    public static function delete_cache_for( $message, $category = '', $model = '' ) {
-        $key = self::build_cache_key( $message, $category, $model );
+    public static function delete_cache_for( $message, $category = '', $model = '', $job_title = '' ) {
+        $key = self::build_cache_key( $message, $category, $model, $job_title );
         delete_transient( $key );
+
+        if ( '' !== $job_title ) {
+            $legacy_key = self::build_cache_key( $message, $category, $model );
+            delete_transient( $legacy_key );
+        }
     }
 
-    public static function extend_cache_ttl( $message, $category = '', $model = '', $ttl = 0 ) {
+    public static function extend_cache_ttl( $message, $category = '', $model = '', $ttl = 0, $job_title = '' ) {
         if ( ! self::is_cache_enabled() ) {
             return;
         }
 
-        $key      = self::build_cache_key( $message, $category, $model );
+        $key      = self::build_cache_key( $message, $category, $model, $job_title );
         $payload  = get_transient( $key );
+        if ( false === $payload && '' !== $job_title ) {
+            $legacy_key = self::build_cache_key( $message, $category, $model );
+            $legacy     = get_transient( $legacy_key );
+            if ( false !== $legacy ) {
+                $key     = $legacy_key;
+                $payload = $legacy;
+            }
+        }
         if ( false === $payload ) {
             return;
         }
@@ -762,16 +797,65 @@ class BKJA_Chat {
 
         $api_key = self::get_api_key();
 
-        $cache_enabled = self::is_cache_enabled();
-        $cache_key     = self::build_cache_key( $normalized_message, $resolved_category, $model );
+        $cache_enabled   = self::is_cache_enabled();
+        $cache_job_title = '';
+        if ( ! empty( $context['job_title'] ) ) {
+            $cache_job_title = $context['job_title'];
+        } elseif ( '' !== $job_title_hint ) {
+            $cache_job_title = $job_title_hint;
+        }
+
+        $cache_key           = self::build_cache_key( $normalized_message, $resolved_category, $model, $cache_job_title );
+        $legacy_cache_key    = '';
+        if ( $cache_enabled && '' !== $cache_job_title ) {
+            $legacy_cache_key = self::build_cache_key( $normalized_message, $resolved_category, $model );
+        }
         if ( $cache_enabled ) {
             $cached = get_transient( $cache_key );
+            if ( false === $cached && '' !== $legacy_cache_key ) {
+                $cached = get_transient( $legacy_cache_key );
+            }
             if ( false !== $cached && self::should_accept_cached_payload( $normalized_message, $cached ) ) {
                 if ( is_array( $cached ) ) {
                     $cached['from_cache']        = true;
                     $cached['model']             = isset( $cached['model'] ) ? $cached['model'] : $model;
-                    $cached['category']          = $resolved_category;
+                    if ( ! isset( $cached['category'] ) || '' === $cached['category'] ) {
+                        $cached['category'] = $resolved_category;
+                    }
+                    $cached_job_title = '';
+                    if ( ! empty( $context['job_title'] ) ) {
+                        $cached_job_title = $context['job_title'];
+                    } elseif ( ! empty( $cached['job_title'] ) ) {
+                        $cached_job_title = $cached['job_title'];
+                    }
+                    if ( '' !== $cached_job_title ) {
+                        $cached['job_title'] = $cached_job_title;
+                    }
                     $cached['normalized_message'] = $normalized_message;
+                    if ( ! isset( $cached['meta'] ) || ! is_array( $cached['meta'] ) ) {
+                        $cached['meta'] = array();
+                    }
+                    if ( ! isset( $cached['meta']['category'] ) || '' === $cached['meta']['category'] ) {
+                        $cached['meta']['category'] = $cached['category'];
+                    }
+                    if ( '' !== $cached_job_title && ( ! isset( $cached['meta']['job_title'] ) || '' === $cached['meta']['job_title'] ) ) {
+                        $cached['meta']['job_title'] = $cached_job_title;
+                    }
+                    $job_slug_value = '';
+                    if ( ! empty( $context['job_slug'] ) ) {
+                        $job_slug_value = $context['job_slug'];
+                    } elseif ( '' !== $job_slug ) {
+                        $job_slug_value = $job_slug;
+                    }
+
+                    if ( '' !== $job_slug_value ) {
+                        if ( ! isset( $cached['job_slug'] ) || '' === $cached['job_slug'] ) {
+                            $cached['job_slug'] = $job_slug_value;
+                        }
+                        if ( ! isset( $cached['meta']['job_slug'] ) || '' === $cached['meta']['job_slug'] ) {
+                            $cached['meta']['job_slug'] = $job_slug_value;
+                        }
+                    }
                     return $cached;
                 }
 
@@ -784,6 +868,8 @@ class BKJA_Chat {
                     array(
                         'model'              => $model,
                         'category'           => $resolved_category,
+                        'job_title'          => ! empty( $context['job_title'] ) ? $context['job_title'] : $cache_job_title,
+                        'job_slug'           => ! empty( $context['job_slug'] ) ? $context['job_slug'] : $job_slug,
                         'normalized_message' => $normalized_message,
                     )
                 );
@@ -814,6 +900,8 @@ class BKJA_Chat {
                     array(
                         'model'              => $model,
                         'category'           => $resolved_category,
+                        'job_title'          => ! empty( $context['job_title'] ) ? $context['job_title'] : $cache_job_title,
+                        'job_slug'           => ! empty( $context['job_slug'] ) ? $context['job_slug'] : $job_slug,
                         'normalized_message' => $normalized_message,
                     )
                 );
@@ -898,6 +986,8 @@ class BKJA_Chat {
                     array(
                         'model'              => $model,
                         'category'           => $resolved_category,
+                        'job_title'          => ! empty( $context['job_title'] ) ? $context['job_title'] : $cache_job_title,
+                        'job_slug'           => ! empty( $context['job_slug'] ) ? $context['job_slug'] : $job_slug,
                         'normalized_message' => $normalized_message,
                     )
                 );
@@ -925,6 +1015,8 @@ class BKJA_Chat {
                     array(
                         'model'              => $model,
                         'category'           => $resolved_category,
+                        'job_title'          => ! empty( $context['job_title'] ) ? $context['job_title'] : $cache_job_title,
+                        'job_slug'           => ! empty( $context['job_slug'] ) ? $context['job_slug'] : $job_slug,
                         'normalized_message' => $normalized_message,
                     )
                 );
@@ -956,11 +1048,29 @@ class BKJA_Chat {
             array(
                 'model'              => $model,
                 'category'           => $resolved_category,
+                'job_title'          => ! empty( $context['job_title'] ) ? $context['job_title'] : $cache_job_title,
+                'job_slug'           => ! empty( $context['job_slug'] ) ? $context['job_slug'] : $job_slug,
                 'normalized_message' => $normalized_message,
             )
         );
 
         if ( $cache_enabled ) {
+            $result_job_title = '';
+            if ( isset( $result['meta'] ) && is_array( $result['meta'] ) && ! empty( $result['meta']['job_title'] ) ) {
+                $result_job_title = $result['meta']['job_title'];
+            } elseif ( ! empty( $result['job_title'] ) ) {
+                $result_job_title = $result['job_title'];
+            }
+
+            if ( '' !== $result_job_title && $result_job_title !== $cache_job_title ) {
+                $legacy_key_to_clear = self::build_cache_key( $normalized_message, $resolved_category, $model, $cache_job_title );
+                $cache_key           = self::build_cache_key( $normalized_message, $resolved_category, $model, $result_job_title );
+
+                if ( $legacy_key_to_clear !== $cache_key ) {
+                    delete_transient( $legacy_key_to_clear );
+                }
+            }
+
             set_transient( $cache_key, $result, self::get_cache_ttl( $model ) );
         }
 

@@ -171,6 +171,12 @@ class BKJA_Frontend {
         $comment  = isset($_POST['comment']) ? sanitize_textarea_field(wp_unslash($_POST['comment'])) : '';
         $category = isset($_POST['category']) ? sanitize_text_field(wp_unslash($_POST['category'])) : '';
         $model    = isset($_POST['model']) ? sanitize_text_field(wp_unslash($_POST['model'])) : '';
+        $job_title = isset($_POST['job_title']) ? sanitize_text_field(wp_unslash($_POST['job_title'])) : '';
+        $job_slug  = isset($_POST['job_slug']) ? sanitize_text_field(wp_unslash($_POST['job_slug'])) : '';
+
+        if ( '' === $job_title && '' !== $job_slug ) {
+            $job_title = $job_slug;
+        }
 
         $normalized_message = BKJA_Chat::normalize_message($message);
         $resolved_model     = BKJA_Chat::resolve_model($model);
@@ -193,9 +199,9 @@ class BKJA_Frontend {
         }
 
         if ( -1 === $vote ) {
-            BKJA_Chat::delete_cache_for( $normalized_message, $category, $resolved_model );
+            BKJA_Chat::delete_cache_for( $normalized_message, $category, $resolved_model, $job_title );
         } else {
-            BKJA_Chat::extend_cache_ttl( $normalized_message, $category, $resolved_model, 3 * HOUR_IN_SECONDS );
+            BKJA_Chat::extend_cache_ttl( $normalized_message, $category, $resolved_model, 3 * HOUR_IN_SECONDS, $job_title );
         }
 
         wp_send_json_success(array('success'=>true));

@@ -229,9 +229,13 @@
                 $btn.html(formatMessage(text));
                 $btn.on('click', function(){
                     removeFollowups();
-                    $input.val(text);
-                    $input.focus();
-                    setTimeout(function(){ $form.trigger('submit'); }, 120);
+                    var followMeta = meta || {};
+                    var opts = {
+                        category: followMeta.category || '',
+                        jobTitle: followMeta.job_title || '',
+                        jobSlug: followMeta.job_slug || ''
+                    };
+                    dispatchUserMessage(text, opts);
                 });
                 $wrap.append($btn);
             });
@@ -625,6 +629,9 @@
                 var sendOptions = { contextMessage: text };
                 if(typeof options.category === 'string' && options.category.length){
                     sendOptions.category = options.category;
+                }
+                if(!sendOptions.category && lastReplyMeta && typeof lastReplyMeta.category === 'string' && lastReplyMeta.category.length){
+                    sendOptions.category = lastReplyMeta.category;
                 }
                 if(options.highlightFeedback){
                     sendOptions.highlightFeedback = true;
