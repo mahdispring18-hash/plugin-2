@@ -230,6 +230,18 @@ class BKJA_Chat {
         }
 
         if ( is_array( $payload ) ) {
+            $source = isset( $payload['source'] ) ? $payload['source'] : '';
+            if ( empty( $source ) && isset( $payload['meta'] ) && is_array( $payload['meta'] ) ) {
+                $source = isset( $payload['meta']['source'] ) ? $payload['meta']['source'] : '';
+            }
+
+            if ( in_array( $source, array( 'database', 'job_context' ), true ) ) {
+                $api_key = self::get_api_key();
+                if ( ! empty( $api_key ) ) {
+                    return false;
+                }
+            }
+
             $text = isset( $payload['text'] ) ? $payload['text'] : '';
         } else {
             $text = (string) $payload;
@@ -748,13 +760,7 @@ class BKJA_Chat {
         $normalized_message = self::normalize_message( $message );
         $context            = self::get_job_context( $normalized_message, $job_title_hint, $job_slug );
 
-        $db_payload = self::try_answer_from_db( $message, $context, $model, $resolved_category, $normalized_message, $job_title_hint, $job_slug );
-        if ( $db_payload ) {
-            $db_payload['model']              = $model;
-            $db_payload['category']           = $resolved_category;
-            $db_payload['normalized_message'] = $normalized_message;
-            return $db_payload;
-        }
+        $api_key = self::get_api_key();
 
         $cache_enabled = self::is_cache_enabled();
         $cache_key     = self::build_cache_key( $normalized_message, $resolved_category, $model );
@@ -784,8 +790,20 @@ class BKJA_Chat {
             }
         }
 
-        $api_key = self::get_api_key();
         if ( empty( $api_key ) ) {
+            $db_payload = self::try_answer_from_db( $message, $context, $model, $resolved_category, $normalized_message, $job_title_hint, $job_slug );
+            if ( $db_payload ) {
+                $db_payload['model']              = $model;
+                $db_payload['category']           = $resolved_category;
+                $db_payload['normalized_message'] = $normalized_message;
+
+                if ( $cache_enabled ) {
+                    set_transient( $cache_key, $db_payload, self::get_cache_ttl( $model ) );
+                }
+
+                return $db_payload;
+            }
+
             if ( ! empty( $context ) ) {
                 $fallback = self::build_response_payload(
                     self::format_job_context_reply( $context ),
