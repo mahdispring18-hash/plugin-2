@@ -198,6 +198,30 @@
   box-shadow: 0 4px 12px rgba(15, 118, 255, 0.14);
   background: linear-gradient(120deg, #f8fbff 0%, #d9edff 100%);
 }
+.bkja-quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  direction: rtl;
+}
+.bkja-btn-next {
+  background: linear-gradient(120deg, #ffffff 0%, #e6f3ff 100%);
+  color: #0b6fab;
+  border: none;
+  border-radius: 10px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(15, 118, 255, 0.08);
+  transition: transform 0.15s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+.bkja-btn-next:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(15, 118, 255, 0.14);
+  background: linear-gradient(120deg, #f8fbff 0%, #d9edff 100%);
+}
 .bkja-response-meta {
   font-size: 12px;
   color: #475569;
