@@ -38,9 +38,11 @@ class BKJA_Frontend {
 
     public static function ajax_send_message(){
         check_ajax_referer('bkja_nonce','nonce');
-        $message  = isset($_POST['message']) ? sanitize_textarea_field(wp_unslash($_POST['message'])) : '';
-        $category = isset($_POST['category']) ? sanitize_text_field(wp_unslash($_POST['category'])) : '';
-        $session  = isset($_POST['session']) ? sanitize_text_field(wp_unslash($_POST['session'])) : '';
+        $message         = isset($_POST['message']) ? sanitize_textarea_field(wp_unslash($_POST['message'])) : '';
+        $category        = isset($_POST['category']) ? sanitize_text_field(wp_unslash($_POST['category'])) : '';
+        $session         = isset($_POST['session']) ? sanitize_text_field(wp_unslash($_POST['session'])) : '';
+        $job_title_hint  = isset($_POST['job_title']) ? sanitize_text_field(wp_unslash($_POST['job_title'])) : '';
+        $job_slug        = isset($_POST['job_slug']) ? sanitize_text_field(wp_unslash($_POST['job_slug'])) : '';
 
         if ( empty($message) ) {
             wp_send_json_error(array('error'=>'empty_message'),400);
@@ -79,10 +81,12 @@ class BKJA_Frontend {
         $resolved_model = BKJA_Chat::resolve_model($selected_model);
 
         $ai_response = BKJA_Chat::call_openai($message, array(
-            'session_id' => $session,
-            'user_id'    => $user_id,
-            'category'   => $category,
-            'model'      => $resolved_model,
+            'session_id'     => $session,
+            'user_id'        => $user_id,
+            'category'       => $category,
+            'model'          => $resolved_model,
+            'job_title_hint' => $job_title_hint,
+            'job_slug'       => $job_slug,
         ));
 
         $suggestions    = array();
@@ -116,11 +120,19 @@ class BKJA_Frontend {
             }
 
             if (!isset($meta_payload['job_title']) || $meta_payload['job_title'] === '') {
-                $meta_payload['job_title'] = !empty($ai_response['job_title']) ? $ai_response['job_title'] : '';
+                if (!empty($ai_response['job_title'])) {
+                    $meta_payload['job_title'] = $ai_response['job_title'];
+                } elseif (!empty($job_title_hint)) {
+                    $meta_payload['job_title'] = $job_title_hint;
+                }
             }
 
             if (!isset($meta_payload['job_slug'])) {
-                $meta_payload['job_slug'] = isset($ai_response['job_slug']) ? $ai_response['job_slug'] : null;
+                if (isset($ai_response['job_slug'])) {
+                    $meta_payload['job_slug'] = $ai_response['job_slug'];
+                } elseif (!empty($job_slug)) {
+                    $meta_payload['job_slug'] = $job_slug;
+                }
             }
 
             $reply_meta = wp_json_encode($meta_payload);

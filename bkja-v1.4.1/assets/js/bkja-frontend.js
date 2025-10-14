@@ -118,6 +118,17 @@
             return key.replace(/[-_]+/g, ' ').trim();
         }
 
+        function cleanJobHint(value){
+            if(value === null || value === undefined){
+                return '';
+            }
+            var text = $.trim(String(value));
+            if(!text || text === 'این حوزه'){
+                return '';
+            }
+            return text;
+        }
+
         function buildNextStepPrompt(info){
             info = info || {};
             var label = info.jobTitle || mapCategoryToHumanName(info.category) || 'این حوزه';
@@ -146,7 +157,7 @@
             btnNext.textContent = 'قدم بعدی منطقی';
             btnNext.addEventListener('click', function(){
                 var followup = buildNextStepPrompt({ category: cat, jobTitle: job, jobSlug: slug });
-                dispatchUserMessage(followup, { category: cat });
+                dispatchUserMessage(followup, { category: cat, jobTitle: job, jobSlug: slug });
             });
 
             wrap.appendChild(btnNext);
@@ -619,6 +630,21 @@
                     sendOptions.highlightFeedback = true;
                 }
 
+                var explicitJobTitle = cleanJobHint(options.jobTitle);
+                var fallbackJobTitle = cleanJobHint(lastKnownJobTitle);
+                if(explicitJobTitle){
+                    sendOptions.jobTitle = explicitJobTitle;
+                } else if(fallbackJobTitle){
+                    sendOptions.jobTitle = fallbackJobTitle;
+                }
+
+                var explicitJobSlug = cleanJobHint(options.jobSlug);
+                if(explicitJobSlug){
+                    sendOptions.jobSlug = explicitJobSlug;
+                } else if(lastReplyMeta && cleanJobHint(lastReplyMeta.job_slug)){
+                    sendOptions.jobSlug = cleanJobHint(lastReplyMeta.job_slug);
+                }
+
                 sendMessageToServer(text, sendOptions);
             }
 
@@ -633,6 +659,12 @@
                 };
                 if(opts.category){
                     payload.category = opts.category;
+                }
+                if(cleanJobHint(opts.jobTitle)){
+                    payload.job_title = cleanJobHint(opts.jobTitle);
+                }
+                if(cleanJobHint(opts.jobSlug)){
+                    payload.job_slug = cleanJobHint(opts.jobSlug);
                 }
                 $.post(config.ajax_url, payload, function(res){
                     personalityFlow.awaitingResult = false;
