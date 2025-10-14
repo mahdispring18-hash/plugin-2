@@ -457,10 +457,12 @@ class BKJA_Chat {
     }
 
     protected static function build_response_payload( $text, $context, $message, $from_cache = false, $source = 'openai', $extra = array() ) {
+        $context_used = ! empty( $context['job_title'] );
+
         $payload = array(
             'text'         => (string) $text,
             'suggestions'  => self::build_followup_suggestions( $message, $context, $text ),
-            'context_used' => ! empty( $context['job_title'] ),
+            'context_used' => $context_used,
             'from_cache'   => (bool) $from_cache,
             'source'       => $source,
             'job_title'    => ! empty( $context['job_title'] ) ? $context['job_title'] : '',
@@ -469,6 +471,22 @@ class BKJA_Chat {
         if ( ! empty( $extra ) && is_array( $extra ) ) {
             $payload = array_merge( $payload, $extra );
         }
+
+        $resolved_category = null;
+        if ( isset( $payload['category'] ) && '' !== $payload['category'] ) {
+            $resolved_category = $payload['category'];
+        } elseif ( isset( $extra['category'] ) && '' !== $extra['category'] ) {
+            $resolved_category = $extra['category'];
+        }
+
+        $payload['meta'] = array(
+            'context_used' => $context_used,
+            'from_cache'   => (bool) $from_cache,
+            'source'       => $source,
+            'category'     => $resolved_category,
+            'job_title'    => isset( $context['job_title'] ) ? $context['job_title'] : null,
+            'job_slug'     => isset( $context['job_slug'] ) ? $context['job_slug'] : null,
+        );
 
         return $payload;
     }
@@ -528,30 +546,31 @@ class BKJA_Chat {
             'user_id'    => 0,
             'category'   => '',
         );
-        $args   = wp_parse_args( $args, $defaults );
-        $model  = self::resolve_model( $args['model'] );
-        $system = ! empty( $args['system'] ) ? $args['system'] : $defaults['system'];
+        $args              = wp_parse_args( $args, $defaults );
+        $model             = self::resolve_model( $args['model'] );
+        $system            = ! empty( $args['system'] ) ? $args['system'] : $defaults['system'];
+        $resolved_category = is_string( $args['category'] ) ? $args['category'] : '';
 
         $normalized_message = self::normalize_message( $message );
         $context            = self::get_job_context( $normalized_message );
 
-        $db_payload = self::try_answer_from_db( $message, $context, $model, $args['category'], $normalized_message );
+        $db_payload = self::try_answer_from_db( $message, $context, $model, $resolved_category, $normalized_message );
         if ( $db_payload ) {
             $db_payload['model']              = $model;
-            $db_payload['category']           = is_string( $args['category'] ) ? $args['category'] : '';
+            $db_payload['category']           = $resolved_category;
             $db_payload['normalized_message'] = $normalized_message;
             return $db_payload;
         }
 
         $cache_enabled = self::is_cache_enabled();
-        $cache_key     = self::build_cache_key( $normalized_message, $args['category'], $model );
+        $cache_key     = self::build_cache_key( $normalized_message, $resolved_category, $model );
         if ( $cache_enabled ) {
             $cached = get_transient( $cache_key );
             if ( false !== $cached && self::should_accept_cached_payload( $normalized_message, $cached ) ) {
                 if ( is_array( $cached ) ) {
                     $cached['from_cache']        = true;
                     $cached['model']             = isset( $cached['model'] ) ? $cached['model'] : $model;
-                    $cached['category']          = is_string( $args['category'] ) ? $args['category'] : '';
+                    $cached['category']          = $resolved_category;
                     $cached['normalized_message'] = $normalized_message;
                     return $cached;
                 }
@@ -564,7 +583,7 @@ class BKJA_Chat {
                     'cache',
                     array(
                         'model'              => $model,
-                        'category'           => is_string( $args['category'] ) ? $args['category'] : '',
+                        'category'           => $resolved_category,
                         'normalized_message' => $normalized_message,
                     )
                 );
@@ -582,7 +601,7 @@ class BKJA_Chat {
                     'job_context',
                     array(
                         'model'              => $model,
-                        'category'           => is_string( $args['category'] ) ? $args['category'] : '',
+                        'category'           => $resolved_category,
                         'normalized_message' => $normalized_message,
                     )
                 );
@@ -666,7 +685,7 @@ class BKJA_Chat {
                     'job_context',
                     array(
                         'model'              => $model,
-                        'category'           => is_string( $args['category'] ) ? $args['category'] : '',
+                        'category'           => $resolved_category,
                         'normalized_message' => $normalized_message,
                     )
                 );
@@ -693,7 +712,7 @@ class BKJA_Chat {
                     'job_context',
                     array(
                         'model'              => $model,
-                        'category'           => is_string( $args['category'] ) ? $args['category'] : '',
+                        'category'           => $resolved_category,
                         'normalized_message' => $normalized_message,
                     )
                 );
@@ -724,7 +743,7 @@ class BKJA_Chat {
             $source,
             array(
                 'model'              => $model,
-                'category'           => is_string( $args['category'] ) ? $args['category'] : '',
+                'category'           => $resolved_category,
                 'normalized_message' => $normalized_message,
             )
         );

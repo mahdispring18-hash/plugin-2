@@ -26,6 +26,7 @@
         var $messages = $('.bkja-messages');
         var lastKnownJobTitle = '';
         var lastReplyMeta = {};
+        var categoryDisplayNames = {};
         var personalityFlow = {
             active: false,
             awaitingResult: false,
@@ -97,6 +98,89 @@
             var $m = $('<div class="bkja-bubble bot"></div>').html(content);
             $messages.append($m);
             $messages.scrollTop($messages.prop('scrollHeight'));
+        }
+
+        function mapCategoryToHumanName(category){
+            if(category === null || category === undefined){
+                return '';
+            }
+            var key = String(category);
+            var lookup = key.toLowerCase();
+            if(categoryDisplayNames.hasOwnProperty(lookup)){
+                return categoryDisplayNames[lookup];
+            }
+            if(categoryDisplayNames.hasOwnProperty(key)){
+                return categoryDisplayNames[key];
+            }
+            if(lookup === 'generic'){
+                return '';
+            }
+            return key.replace(/[-_]+/g, ' ').trim();
+        }
+
+        function buildNextStepPrompt(info){
+            info = info || {};
+            var label = info.jobTitle || mapCategoryToHumanName(info.category) || 'این حوزه';
+            return 'به من کمک کن بدانم قدم بعدی منطقی برای تحقیق بیشتر درباره ' + label + ' چیست.';
+        }
+
+        function buildQuickActionsForMessage(message){
+            var el = message;
+            if(message && message.jquery){
+                el = message.get(0);
+            }
+            if(!el){
+                return null;
+            }
+            var dataset = el.dataset || {};
+            var cat = dataset.category || el.getAttribute('data-category') || 'generic';
+            var job = dataset.jobTitle || el.getAttribute('data-job-title') || '';
+            var slug = dataset.jobSlug || el.getAttribute('data-job-slug') || '';
+
+            var wrap = document.createElement('div');
+            wrap.className = 'bkja-quick-actions';
+
+            var btnNext = document.createElement('button');
+            btnNext.type = 'button';
+            btnNext.className = 'bkja-btn-next';
+            btnNext.textContent = 'قدم بعدی منطقی';
+            btnNext.addEventListener('click', function(){
+                var followup = buildNextStepPrompt({ category: cat, jobTitle: job, jobSlug: slug });
+                dispatchUserMessage(followup, { category: cat });
+            });
+
+            wrap.appendChild(btnNext);
+
+            return wrap;
+        }
+
+        function applyAssistantMeta($message, meta){
+            if(!$message || !$message.length){
+                return;
+            }
+            var data = meta || {};
+            var el = $message.get(0);
+            if(!el){
+                return;
+            }
+            var categoryValue = data.category ? String(data.category) : '';
+            var jobTitleValue = data.job_title ? String(data.job_title) : '';
+            var jobSlugValue = data.job_slug ? String(data.job_slug) : '';
+
+            if(el.dataset){
+                el.dataset.category = categoryValue;
+                el.dataset.jobTitle = jobTitleValue;
+                el.dataset.jobSlug = jobSlugValue;
+            }
+            el.setAttribute('data-category', categoryValue);
+            el.setAttribute('data-job-title', jobTitleValue);
+            el.setAttribute('data-job-slug', jobSlugValue);
+
+            $message.find('.bkja-quick-actions').remove();
+            var actions = buildQuickActionsForMessage(el);
+            if(actions && actions.childNodes && actions.childNodes.length){
+                $message.append(actions);
+            }
         }
 
         function removeFollowups(){
@@ -217,6 +301,22 @@
                 if(sending){ return; }
                 sending = true;
                 $status.text('در حال ارسال بازخورد...');
+
+                var bubbleEl = $bubble && $bubble.length ? $bubble.get(0) : null;
+                var dataset = bubbleEl && bubbleEl.dataset ? bubbleEl.dataset : {};
+                var datasetCategory = dataset && dataset.category ? dataset.category : '';
+                var datasetJobTitle = dataset && dataset.jobTitle ? dataset.jobTitle : '';
+                var datasetJobSlug = dataset && dataset.jobSlug ? dataset.jobSlug : '';
+                if(!datasetCategory && bubbleEl){
+                    datasetCategory = bubbleEl.getAttribute('data-category') || '';
+                }
+                if(!datasetJobTitle && bubbleEl){
+                    datasetJobTitle = bubbleEl.getAttribute('data-job-title') || '';
+                }
+                if(!datasetJobSlug && bubbleEl){
+                    datasetJobSlug = bubbleEl.getAttribute('data-job-slug') || '';
+                }
+
                 var payload = {
                     action: 'bkja_feedback',
                     nonce: config.nonce,
@@ -224,14 +324,30 @@
                     vote: vote,
                     message: normalizedMessage,
                     response: responseText || '',
-                    category: meta.category || '',
-                    model: meta.model || ''
+                    category: datasetCategory || meta.category || '',
+                    model: meta.model || '',
+                    job_title: datasetJobTitle || meta.job_title || ''
                 };
+                if(datasetJobSlug || meta.job_slug){
+                    payload.job_slug = datasetJobSlug || meta.job_slug || '';
+                }
                 if(vote === -1){
                     payload.tags = $.trim($tags.val());
                     payload.comment = $.trim($comment.val());
                 }
-                $.post(config.ajax_url, payload, function(res){
+                var requestBody = new URLSearchParams(payload).toString();
+                fetch(config.ajax_url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                    },
+                    body: requestBody
+                }).then(function(response){
+                    if(!response.ok){
+                        throw new Error('Request failed');
+                    }
+                    return response.json();
+                }).then(function(res){
                     sending = false;
                     if(res && res.success){
                         $status.text('بازخورد شما ثبت شد. ممنونیم!');
@@ -244,7 +360,7 @@
                     } else {
                         $status.text('خطا در ثبت بازخورد. دوباره تلاش کنید.');
                     }
-                }).fail(function(){
+                }).catch(function(){
                     sending = false;
                     $status.text('خطا در ارتباط با سرور.');
                 });
@@ -466,6 +582,46 @@
                 });
             }
 
+            function dispatchUserMessage(message, options){
+                options = options || {};
+                var text = message;
+                if(text === null || text === undefined){
+                    text = '';
+                }
+                text = $.trim(String(text));
+                if(!text){
+                    return;
+                }
+
+                removeFollowups();
+                if(personalityFlow.awaitingResult){
+                    personalityFlow.awaitingResult = false;
+                }
+
+                pushUser(text);
+                $input.val('');
+
+                if(personalityFlow.active){
+                    handlePersonalityAnswer(text);
+                    return;
+                }
+
+                if(shouldStartPersonalityFlow(text)){
+                    startPersonalityFlow(text);
+                    return;
+                }
+
+                var sendOptions = { contextMessage: text };
+                if(typeof options.category === 'string' && options.category.length){
+                    sendOptions.category = options.category;
+                }
+                if(options.highlightFeedback){
+                    sendOptions.highlightFeedback = true;
+                }
+
+                sendMessageToServer(text, sendOptions);
+            }
+
             function sendMessageToServer(message, opts){
                 opts = opts || {};
                 var contextMessage = opts.contextMessage || message;
@@ -491,6 +647,7 @@
                         lastReplyMeta = meta;
                         pushBot(reply, {
                             onComplete: function($bubble){
+                                applyAssistantMeta($bubble, meta);
                                 if(fromCache){
                                     appendResponseMeta('🔄 این پاسخ از حافظه کش ارائه شد تا سریع‌تر به شما نمایش داده شود.');
                                 }
@@ -527,23 +684,8 @@
 
             $form.on('submit', function(e){
                 e.preventDefault();
-                var msg = $input.val().trim();
-                if(!msg) return;
-                removeFollowups();
-                if(personalityFlow.awaitingResult){
-                    personalityFlow.awaitingResult = false;
-                }
-                pushUser(msg);
-                $input.val('');
-                if(personalityFlow.active){
-                    handlePersonalityAnswer(msg);
-                    return;
-                }
-                if(shouldStartPersonalityFlow(msg)){
-                    startPersonalityFlow(msg);
-                    return;
-                }
-                sendMessageToServer(msg, { contextMessage: msg });
+                var msg = $input.val();
+                dispatchUserMessage(msg);
             });
         }
 
@@ -609,6 +751,17 @@
                     $(".bkja-profile-section").after($historyBtn);
                     res.data.categories.forEach(function(cat){
                         var icon = cat.icon || "💼";
+                        if(cat.name){
+                            if(typeof cat.slug !== 'undefined' && cat.slug !== null){
+                                var slugKey = String(cat.slug);
+                                categoryDisplayNames[slugKey] = cat.name;
+                                categoryDisplayNames[slugKey.toLowerCase()] = cat.name;
+                            }
+                            if(typeof cat.id !== 'undefined' && cat.id !== null){
+                                var idKey = String(cat.id);
+                                categoryDisplayNames[idKey] = cat.name;
+                            }
+                        }
                         var $li = $('<li class="bkja-category-item" data-id="'+cat.id+'"><span class="bkja-cat-icon">'+icon+'</span> <span>'+esc(cat.name)+'</span></li>');
                         $list.append($li);
                     });

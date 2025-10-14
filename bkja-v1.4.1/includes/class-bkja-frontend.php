@@ -85,10 +85,10 @@ class BKJA_Frontend {
             'model'      => $resolved_model,
         ));
 
-        $suggestions = array();
-        $reply_meta  = null;
-        $from_cache  = false;
-        $meta_payload = array();
+        $suggestions    = array();
+        $reply_meta     = null;
+        $from_cache     = false;
+        $meta_payload   = array();
         $normalized_message = BKJA_Chat::normalize_message($message);
         if (is_wp_error($ai_response)) {
             $reply = 'خطا یا کلید API تنظیم نشده. '.$ai_response->get_error_message();
@@ -106,6 +106,23 @@ class BKJA_Frontend {
                 'normalized_message' => $normalized_message,
                 'job_title'          => !empty($ai_response['job_title']) ? $ai_response['job_title'] : '',
             );
+
+            if (isset($ai_response['meta']) && is_array($ai_response['meta'])) {
+                $meta_payload = array_merge($meta_payload, $ai_response['meta']);
+            }
+
+            if (!isset($meta_payload['category']) || $meta_payload['category'] === '') {
+                $meta_payload['category'] = $category;
+            }
+
+            if (!isset($meta_payload['job_title']) || $meta_payload['job_title'] === '') {
+                $meta_payload['job_title'] = !empty($ai_response['job_title']) ? $ai_response['job_title'] : '';
+            }
+
+            if (!isset($meta_payload['job_slug'])) {
+                $meta_payload['job_slug'] = isset($ai_response['job_slug']) ? $ai_response['job_slug'] : null;
+            }
+
             $reply_meta = wp_json_encode($meta_payload);
         }
 
